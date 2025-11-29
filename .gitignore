@@ -1,0 +1,4 @@
+.env
+*.csv
+fetch_checkpoint.json
+*_partial.csv
