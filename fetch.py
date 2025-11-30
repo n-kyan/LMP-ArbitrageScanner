@@ -7,6 +7,8 @@ import os
 import json
 from dotenv import load_dotenv
 
+load_dotenv()
+
 # Used for more informed console messages. Will pring timestamp along with message.
 logging.basicConfig(
     level=logging.INFO,
