@@ -47,7 +47,9 @@ class PJMFetcher:
             'da_complete': False,
             'da_start_row': 1,
             'start_date': None,
-            'end_date': None
+            'end_date': None,
+            'total_requests': 0,
+            'total_time_seconds': 0
         }
 
     def _save_checkpoint(self):
@@ -78,9 +80,8 @@ class PJMFetcher:
             # Fetch all nodes for date range with pagination
             endpoint = 'da_hrl_lmps' if market == 'da' else 'rt_hrl_lmps'
             start_row = 1
-            chunk_num = 0
-            temp_files = []
             rows = 50000
+            start_time = time.time()
 
             if market == 'rt':
                 if self.checkpoint['rt_complete']:
@@ -135,18 +136,6 @@ class PJMFetcher:
                             break
 
                         batch = pd.DataFrame(data['items'])
-                        # Standardize column names
-                        batch = batch.rename(columns={
-                            'total_lmp_rt': 'total_lmp', 'total_lmp_da': 'total_lmp',
-                            'congestion_price_rt': 'congestion', 'congestion_price_da': 'congestion',
-                            'marginal_loss_price_rt': 'loss', 'marginal_loss_price_da': 'loss',
-                            'system_energy_price_rt': 'energy', 'system_energy_price_da': 'energy'
-                        })
-
-                        batch['datetime'] = pd.to_datetime(batch['datetime_beginning_ept'])
-
-                        # Keep only essential columns
-                        batch = batch[['datetime', 'pnode_id', 'pnode_name', 'type', 'zone', 'voltage', 'total_lmp', 'congestion', 'loss', 'energy']]
 
                         # Append to CSV immediately (streaming approach)
                         self._append_to_csv(batch, data_file)
@@ -155,19 +144,13 @@ class PJMFetcher:
                         logger.info(f"  ✓ Got {rows_fetched:,} records, appended to {data_file}")
 
                         # Update Checkpoint
+                        self.checkpoint['total_requests'] += 1
                         start_row += rows_fetched
                         if market == 'rt':
                             self.checkpoint['rt_start_row'] = start_row
                         else:
                             self.checkpoint['da_start_row'] = start_row
                         self._save_checkpoint()
-
-                        # Old way with temp files
-                        # temp_file = f'data/temp_{market}_{chunk_num}.csv'
-                        # batch = pd.DataFrame(data['items'])
-                        # batch.to_csv(temp_file, index=False)
-                        # temp_files.append(temp_file)
-                        # chunk_num += 1
                         
                         if rows_fetched < rows:
                             logger.info(f"{market.upper()}: ✅ Complete!")
@@ -179,29 +162,10 @@ class PJMFetcher:
                         logger.info(f"Progress saved. You can resume by running the script again.")
                         raise  # Re-raise to stop execution
                 
-                # if not temp_files:
-                #     return pd.DataFrame()
-                
-                # logger.info(f"Combining {len(temp_files)} temp files...")
-                # df = pd.concat([pd.read_csv(f) for f in temp_files], ignore_index=True)
-        
-                # for f in temp_files:
-                #     os.remove(f)
-        
-                # Standardize column names
-                # df = df.rename(columns={
-                #     'total_lmp_rt': 'total_lmp', 'total_lmp_da': 'total_lmp',
-                #     'congestion_price_rt': 'congestion', 'congestion_price_da': 'congestion',
-                #     'marginal_loss_price_rt': 'loss', 'marginal_loss_price_da': 'loss',
-                #     'system_energy_price_rt': 'energy', 'system_energy_price_da': 'energy'
-                # })
-                
-                # df['datetime'] = pd.to_datetime(df['datetime_beginning_ept'])
-                
-                # return df[['datetime', 'pnode_id', 'pnode_name', 'type', 'zone', 
-                #         'voltage', 'total_lmp', 'congestion', 'loss', 'energy']]
+                elapsed = time.time() - start_time
+                self.checkpoint['total_time_seconds'] += elapsed   
 
-            # Mark as complete
+                # Mark as complete
                 if market == 'rt':
                     self.checkpoint['rt_complete'] = True
                 else:
@@ -241,7 +205,7 @@ def main():
     # start_date = end_date - timedelta(days=30+day_offset)
 
     end_date = datetime(2025, 8, 31, 23, 0)
-    start_date = datetime(2025, 6, 1, 0, 0)
+    start_date = datetime(2025, 1, 1, 0, 0)
     logger.info(f"Date range: {start_date} to {end_date}")
 
 
@@ -270,22 +234,20 @@ def main():
         # Merge on datetime + pnode_id
         logger.info("\n" + "="*70)
         logger.info("\nMerging DA and RT data...")
+
         df = pd.merge(
-            da.add_suffix('_da'),
-            rt.add_suffix('_rt'),
-            left_on=['datetime_da', 'pnode_id_da'],
-            right_on=['datetime_rt', 'pnode_id_rt'],
-            how='inner'
+        da.add_suffix('_da'),
+        rt.add_suffix('_rt'),
+        left_on=['datetime_beginning_ept_da', 'pnode_id_da'],
+        right_on=['datetime_beginning_ept_rt', 'pnode_id_rt'],
+        how='inner'
         )
         
-        # Clean up column names and calculate spread
-        df['datetime'] = df['datetime_da']
-        df['pnode_id'] = df['pnode_id_da']
-        df['zone'] = df['zone_da']
+        # Calculate spread
         df['spread'] = df['total_lmp_da'] - df['total_lmp_rt']
 
         # Save final merged file
-        output_file = 'lmp_data_merged.csv'
+        output_file = 'lmp_scanner/lmp_data_merged.csv'
         df.to_csv(output_file, index=False)
 
         # Clean up partial files and checkpoint
@@ -293,30 +255,21 @@ def main():
         os.remove(fetcher.DATA_FILE_DA)
         os.remove(fetcher.CHECKPOINT_FILE)
         logger.info("🗑️  Cleaned up checkpoint and partial files")
-        
-        # # Keep essential columns
-        # df = df[['datetime', 'pnode_id', 'pnode_name_da', 'zone', 
-        #          'total_lmp_da', 'total_lmp_rt', 'spread',
-        #          'congestion_da', 'congestion_rt',
-        #          'energy_da', 'energy_rt',
-        #          'loss_da', 'loss_rt']]
-        
+
         elapsed = time.time() - start_time
+        total_time = fetcher.checkpoint.get('total_time_seconds', elapsed)
+        total_requests = fetcher.checkpoint.get('total_requests', fetcher.requests_made)
         
-        # Save (old)
-        # output_file = 'lmp_data_merged.csv'
-        # df.to_csv(output_file, index=False)
         
-        # Summary (rest of your code is fine)
+        # Summary
         logger.info("\n" + "="*70)
         logger.info("RESULTS")
         logger.info("="*70)
         logger.info(f"Total records: {len(df):,}")
         logger.info(f"Unique nodes: {df['pnode_id'].nunique():,}")
-        # logger.info(f"Zones: {sorted(df['zone'].unique())}")
-        logger.info(f"Date range: {df['datetime'].min()} to {df['datetime'].max()}")
-        logger.info(f"API requests: {fetcher.requests_made}")
-        logger.info(f"Time elapsed: {elapsed/60:.1f} minutes")
+        logger.info(f"Date range: {df['datetime_beginning_ept_da'].min()} to {df['datetime_beginning_ept_da'].max()}")
+        logger.info(f"API requests: {total_requests}")
+        logger.info(f"Time elapsed: {total_time/60:.1f} minutes")
         logger.info(f"Saved to: {output_file}")
         logger.info("="*70)
 
